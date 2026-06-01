@@ -1,6 +1,6 @@
 # Neotest Zig ⚡
 
-![Zig v0.14.0](https://img.shields.io/badge/Zig-v0.14-orange?logo=zig)
+![Zig v0.16.0](https://img.shields.io/badge/Zig-v0.16-orange?logo=zig)
 ![Neovim v0.10](https://img.shields.io/badge/Neovim-v0.10-green?logo=neovim)
 
 [Neotest](https://github.com/nvim-neotest/neotest) test runner for [Zig](https://github.com/ziglang/zig).
@@ -8,8 +8,7 @@
 https://github.com/lawrence-laz/neotest-zig/assets/8823448/9a003d0a-9ba4-4077-aa1b-3c0c90717734
 
 ## ⚙️ Requirements
-- [`zig` v0.14 installed](https://ziglang.org/download/) and available in PATH
-    - If you are using `zig` v0.13, then use the tagged `neotest-zig` 1.3.* version.
+- [`zig` v0.16 installed](https://ziglang.org/download/) and available in PATH
 - [Neotest](https://github.com/nvim-neotest/neotest#installation)
 - [Treesitter](https://github.com/nvim-treesitter/nvim-treesitter#installation) with [Zig support](https://github.com/maxxnino/tree-sitter-zig)
 

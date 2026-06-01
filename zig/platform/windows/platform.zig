@@ -15,8 +15,8 @@ fn setStdHandle(stdHandle: windows.DWORD, handle: windows.HANDLE) !void {
 
 var original_std_err_handle: windows.HANDLE = windows.INVALID_HANDLE_VALUE;
 
-pub fn redirectStdErrToFile(absolute_file_path: []const u8) !std.fs.File {
-    const file = try std.fs.createFileAbsolute(absolute_file_path, .{});
+pub fn redirectStdErrToFile(io: std.Io, absolute_file_path: []const u8) !std.Io.File {
+    const file = try std.Io.Dir.createFileAbsolute(io, absolute_file_path, .{});
     const handle: std.os.windows.HANDLE = file.handle;
 
     if (original_std_err_handle == windows.INVALID_HANDLE_VALUE) {

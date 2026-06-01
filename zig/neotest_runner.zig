@@ -26,7 +26,13 @@ pub fn runnerLogFn(
 
     const prefix = "[" ++ comptime level.asText() ++ "] ";
 
-    if (@hasDecl(std.debug, "lockStderrWriter")) {
+    if (@hasDecl(std.debug, "lockStderr")) {
+        // zig >= 0.16: lockStderr returns a LockedStderr value.
+        var buf: [4096]u8 = undefined;
+        const stderr = std.debug.lockStderr(&buf);
+        defer std.debug.unlockStderr();
+        nosuspend stderr.file_writer.interface.print(prefix ++ format ++ "\n", args) catch return;
+    } else if (@hasDecl(std.debug, "lockStderrWriter")) {
         // zig >= 0.15: lockStderrWriter locks + returns *Writer in one call
         var buf: [4096]u8 = undefined;
         const stderr = std.debug.lockStderrWriter(&buf);
@@ -97,6 +103,8 @@ else
 fn getSymbolName(symbol: Symbol) []const u8 {
     return if (builtin.zig_version.minor == 13)
         symbol.symbol_name
+    else if (builtin.zig_version.minor >= 16)
+        symbol.name orelse ""
     else
         symbol.name;
 }
@@ -128,12 +136,54 @@ fn getTestInput(
     return null;
 }
 
-fn getFuncSymbolInfo(allocator: std.mem.Allocator, func: *const fn () anyerror!void) !Symbol {
+fn getTestFunctionName(test_function_name: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, test_function_name, ".test.")) |index| {
+        return test_function_name[index + 1 ..];
+    }
+    if (std.mem.indexOf(u8, test_function_name, ".decltest.")) |index| {
+        return test_function_name[index + 1 ..];
+    }
+    return test_function_name;
+}
+
+fn getSymbolAtAddress(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    debug_info: *std.debug.SelfInfo,
+    address: usize,
+) !Symbol {
+    if (builtin.zig_version.minor >= 16) {
+        var text_arena = std.heap.ArenaAllocator.init(allocator);
+        defer text_arena.deinit();
+
+        var symbols = try std.ArrayList(Symbol).initCapacity(allocator, 1);
+        defer symbols.deinit(allocator);
+
+        try debug_info.getSymbols(io, allocator, text_arena.allocator(), address, false, &symbols);
+        if (symbols.items.len == 0) {
+            return error.MissingDebugInfo;
+        }
+
+        const symbol = symbols.items[0];
+        return .{
+            .name = if (symbol.name) |name| try allocator.dupe(u8, name) else null,
+            .compile_unit_name = if (symbol.compile_unit_name) |name| try allocator.dupe(u8, name) else null,
+            .source_location = if (symbol.source_location) |source_location| .{
+                .line = source_location.line,
+                .column = source_location.column,
+                .file_name = try allocator.dupe(u8, source_location.file_name),
+            } else null,
+        };
+    } else {
+        const module = try debug_info.getModuleForAddress(address);
+        return try module.getSymbolAtAddress(allocator, address);
+    }
+}
+
+fn getFuncSymbolInfo(allocator: std.mem.Allocator, io: std.Io, func: *const fn () anyerror!void) !Symbol {
     const debug_info = try std.debug.getSelfDebugInfo();
     const func_address = @intFromPtr(func);
-    const module = try debug_info.getModuleForAddress(func_address);
-    const symbol = try module.getSymbolAtAddress(allocator, func_address);
-    return symbol;
+    return getSymbolAtAddress(allocator, io, debug_info, func_address);
 }
 
 fn getZigLogLevelFromVimLogLevel(vim_log_level: u8) std.log.Level {
@@ -156,8 +206,12 @@ pub inline fn fuzz(
     return;
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    const DebugAllocator = if (@hasDecl(std.heap, "GeneralPurposeAllocator"))
+        std.heap.GeneralPurposeAllocator
+    else
+        std.heap.DebugAllocator;
+    var gpa = DebugAllocator(.{}){};
     // zig >= 0.15: ArrayList = unmanaged; managed moved to array_list.Managed
     // zig <= 0.14: ArrayList = managed (stores allocator)
     const TestResultList = if (builtin.zig_version.minor >= 15)
@@ -165,10 +219,9 @@ pub fn main() !void {
     else
         std.ArrayList(TestResult);
     var test_results = TestResultList.init(gpa.allocator());
-    var debug_info = try std.debug.getSelfDebugInfo();
+    const debug_info = try std.debug.getSelfDebugInfo();
 
-    const args = try std.process.argsAlloc(gpa.allocator());
-    defer std.process.argsFree(gpa.allocator(), args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     var input_path: []const u8 = undefined;
     var results_dir_path: []const u8 = undefined;
@@ -189,7 +242,8 @@ pub fn main() !void {
     }
 
     const logs_file_path = blk: {
-        const self_exe_path = std.fs.selfExePathAlloc(gpa.allocator());
+        const self_exe_path = try std.process.executablePathAlloc(init.io, gpa.allocator());
+        defer gpa.allocator().free(self_exe_path);
         var hasher = std.hash.Wyhash.init(0);
         std.hash.autoHashStrat(&hasher, self_exe_path, .Deep);
         const hash_value = hasher.final();
@@ -197,17 +251,19 @@ pub fn main() !void {
         const logs_file_name = try std.fmt.bufPrint(&hash_buffer, "{d}", .{hash_value});
         break :blk try std.fs.path.join(gpa.allocator(), &.{ logs_dir_path, logs_file_name });
     };
-    const logs_file = try platform.redirectStdErrToFile(logs_file_path);
-    defer logs_file.close();
+    const logs_file = try platform.redirectStdErrToFile(init.io, logs_file_path);
+    defer logs_file.close(init.io);
 
     for (args, 0..) |arg, i| {
         log.debug("arg[{d}] = {s}", .{ i, arg });
     }
 
     const input = blk: {
-        var input_file = try std.fs.openFileAbsolute(input_path, .{});
-        defer input_file.close();
-        const input_json = try input_file.readToEndAlloc(gpa.allocator(), std.math.maxInt(usize));
+        var input_file = try std.Io.Dir.openFileAbsolute(init.io, input_path, .{});
+        defer input_file.close(init.io);
+        var read_buf: [4096]u8 = undefined;
+        var input_reader = input_file.reader(init.io, &read_buf);
+        const input_json = try input_reader.interface.allocRemaining(gpa.allocator(), .unlimited);
         const input_parsed = try std.json.parseFromSlice([]TestInput, gpa.allocator(), input_json, .{});
         break :blk input_parsed.value;
     };
@@ -218,11 +274,15 @@ pub fn main() !void {
     log.debug("\n--------------\nFOUND THESE TESTS:\n", .{});
     for (builtin.test_functions) |test_function| {
         const test_func: *const fn () anyerror!void = test_function.func;
-        const test_symbol = getFuncSymbolInfo(gpa.allocator(), test_func) catch continue;
-        const test_symbol_name = getSymbolName(test_symbol);
+        const test_symbol_name = getTestFunctionName(test_function.name);
         log.debug(" > {s} \n", .{test_symbol_name});
-        if (getSymbolFilename(test_symbol)) |symbol_file_name| {
+        if (source_path) |symbol_file_name| {
             std.hash.autoHashStrat(&hasher, symbol_file_name, .Deep);
+        } else {
+            const test_symbol = getFuncSymbolInfo(gpa.allocator(), init.io, test_func) catch continue;
+            if (getSymbolFilename(test_symbol)) |symbol_file_name| {
+                std.hash.autoHashStrat(&hasher, symbol_file_name, .Deep);
+            }
         }
         std.hash.autoHashStrat(&hasher, test_symbol_name, .Deep);
     }
@@ -233,11 +293,11 @@ pub fn main() !void {
 
     var processed_tests: usize = 0;
 
-    var timer = try std.time.Timer.start();
+    var test_started_at = std.Io.Clock.awake.now(init.io);
 
     for (builtin.test_functions) |test_function| {
-        const file = try platform.redirectStdErrToFile(logs_file_path);
-        defer file.close();
+        const file = try platform.redirectStdErrToFile(init.io, logs_file_path);
+        defer file.close(init.io);
 
         if (processed_tests == input.len) {
             // All requested tests have been processed.
@@ -245,14 +305,16 @@ pub fn main() !void {
         }
 
         const test_func: *const fn () anyerror!void = test_function.func;
-        const test_symbol = getFuncSymbolInfo(gpa.allocator(), test_func) catch {
-            log.debug("getFuncSymbolInfo got error", .{});
-            continue;
-        };
-        const test_symbol_name = getSymbolName(test_symbol);
-        const test_file_name = getSymbolFilename(test_symbol) orelse {
-            log.debug("test_file_name not found", .{});
-            continue;
+        const test_symbol_name = getTestFunctionName(test_function.name);
+        const test_file_name = source_path orelse blk: {
+            const test_symbol = getFuncSymbolInfo(gpa.allocator(), init.io, test_func) catch {
+                log.debug("getFuncSymbolInfo got error", .{});
+                continue;
+            };
+            break :blk getSymbolFilename(test_symbol) orelse {
+                log.debug("test_file_name not found", .{});
+                continue;
+            };
         };
 
         // This is a work around for the issue where `LineInfo.file_name` returns
@@ -260,7 +322,7 @@ pub fn main() !void {
         // When `zig test` is used, neotest adapter provides the `--neotest-source-path`
         // argument, which provides the correct path.
         // https://github.com/ziglang/zig/issues/19556
-        const test_source_path = source_path orelse test_file_name;
+        const test_source_path = test_file_name;
 
         const test_input = getTestInput(test_symbol_name, test_source_path, input) orelse {
             log.debug("getTestInput not found", .{});
@@ -269,23 +331,22 @@ pub fn main() !void {
 
         log.debug("Running test {s}::{s}", .{ test_input.source_path, test_input.test_name });
 
-        const test_input_file = try platform.redirectStdErrToFile(test_input.output_path);
-        defer test_input_file.close();
+        const test_input_file = try platform.redirectStdErrToFile(init.io, test_input.output_path);
+        defer test_input_file.close(init.io);
 
         processed_tests += 1;
 
-        timer.reset();
+        test_started_at = std.Io.Clock.awake.now(init.io);
         test_func() catch |err| {
             var errors = try gpa.allocator().alloc(Error, 1);
             var error_line: ?usize = null;
 
             if (@errorReturnTrace()) |trace| {
-                std.debug.dumpStackTrace(trace.*);
+                std.debug.dumpErrorReturnTrace(trace);
                 const last_frame_index = @min(trace.index, trace.instruction_addresses.len) - 1;
                 const return_address = trace.instruction_addresses[last_frame_index];
                 const address = return_address - 1;
-                const module = try debug_info.getModuleForAddress(address);
-                const symbol_info = try module.getSymbolAtAddress(debug_info.allocator, address);
+                const symbol_info = try getSymbolAtAddress(gpa.allocator(), init.io, debug_info, address);
                 const symbol_line = getSymbolLine(symbol_info) orelse {
                     std.debug.print("Unable to retrieve line info\n", .{});
                     return;
@@ -308,15 +369,15 @@ pub fn main() !void {
             } else {
                 var first_output_line: []const u8 = undefined;
                 blk: {
-                    const output_file = std.fs.openFileAbsolute(test_input.output_path, .{}) catch {
+                    const output_file = std.Io.Dir.openFileAbsolute(init.io, test_input.output_path, .{}) catch {
                         first_output_line = "Could not open output buffer.";
                         break :blk;
                     };
-                    defer output_file.close();
+                    defer output_file.close(init.io);
                     if (builtin.zig_version.minor >= 15) {
                         // zig >= 0.15: reader() takes explicit buf; use interface for generic methods
                         var read_buf: [4096]u8 = undefined;
-                        var output_reader = output_file.reader(&read_buf);
+                        var output_reader = output_file.reader(init.io, &read_buf);
                         first_output_line = output_reader.interface.takeDelimiterExclusive('\n') catch
                             "Could not read output file.";
                     } else {
@@ -349,9 +410,9 @@ pub fn main() !void {
             continue;
         };
 
-        const test_run_duration_in_ns = timer.read();
+        const test_run_duration_in_ns = test_started_at.untilNow(init.io, .awake).nanoseconds;
 
-        if (std.testing.allocator_instance.detectLeaks()) {
+        if (std.testing.allocator_instance.detectLeaks() != 0) {
             try test_results.append(
                 .{
                     .source_path = test_input.source_path,
@@ -366,7 +427,7 @@ pub fn main() !void {
 
         // zig >= 0.15: fmtDuration removed; zig <= 0.14: fmtDuration exists
         const short_output = if (builtin.zig_version.minor >= 15)
-            try std.fmt.allocPrint(gpa.allocator(), "Test passed in {d}ms", .{test_run_duration_in_ns / std.time.ns_per_ms})
+            try std.fmt.allocPrint(gpa.allocator(), "Test passed in {d}ms", .{@divTrunc(test_run_duration_in_ns, std.time.ns_per_ms)})
         else
             try std.fmt.allocPrint(gpa.allocator(), "Test passed in {}", .{std.fmt.fmtDuration(test_run_duration_in_ns)});
 
@@ -386,12 +447,12 @@ pub fn main() !void {
 
     try platform.restoreStdErr();
 
-    const results_file = try std.fs.createFileAbsolute(results_file_path, .{});
-    defer results_file.close();
+    const results_file = try std.Io.Dir.createFileAbsolute(init.io, results_file_path, .{});
+    defer results_file.close(init.io);
     if (builtin.zig_version.minor >= 15) {
         // zig >= 0.15: stringifyAlloc gone; use Stringify writer directly
         var write_buf: [65536]u8 = undefined;
-        var file_writer = results_file.writer(&write_buf);
+        var file_writer = results_file.writer(init.io, &write_buf);
         var jw: std.json.Stringify = .{ .writer = &file_writer.interface };
         try jw.write(test_results.items);
         try file_writer.interface.flush();
