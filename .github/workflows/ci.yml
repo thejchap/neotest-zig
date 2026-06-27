@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  - push
+  - pull_request
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zig:
+    name: Zig 0.16 / Neovim 0.12 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.16.0
+
+      - name: Install Neovim
+        uses: rhysd/action-setup-vim@febef33995d6649302e9d88dda81e071b68f16a7 # v1.6.1
+        with:
+          version: v0.12.2
+          neovim: true
+
+      - name: Check formatting
+        run: zig fmt --check zig tests/zig tests/integration/fixtures tests/ci
+
+      - name: Run Zig unit tests
+        run: >-
+          zig test
+          --dep runner_core
+          -Mroot=tests/zig/runner_core_test.zig
+          -Mrunner_core=zig/runner_core.zig
+
+      - name: Cross-compile Windows platform test
+        if: runner.os != 'Windows'
+        run: >-
+          zig test
+          -target x86_64-windows
+          --test-no-exec
+          --dep platform
+          -Mroot=tests/ci/windows_compile.zig
+          -Mplatform=zig/platform/windows/platform.zig
+
+      - name: Run Windows platform test
+        if: runner.os == 'Windows'
+        run: >-
+          zig test
+          --dep platform
+          -Mroot=tests/ci/windows_compile.zig
+          -Mplatform=zig/platform/windows/platform.zig
+
+      - name: Run standalone integration tests
+        run: nvim --headless -u tests/minimal_init.lua -l tests/integration/runner_spec.lua
+
+      - name: Run build integration tests
+        run: nvim --headless -u tests/minimal_init.lua -l tests/integration/build_runner_spec.lua
+
+  adapter:
+    name: Adapter / Neovim ${{ matrix.neovim }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        neovim:
+          - v0.10.4
+          - v0.11.5
+          - v0.12.2
+    env:
+      NEOTEST_ZIG_DEPS: ${{ runner.temp }}/neotest-zig-deps
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Neovim
+        uses: rhysd/action-setup-vim@febef33995d6649302e9d88dda81e071b68f16a7 # v1.6.1
+        with:
+          version: ${{ matrix.neovim }}
+          neovim: true
+
+      - name: Install Zig for end-to-end smoke test
+        if: matrix.neovim == 'v0.12.2'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.16.0
+
+      - name: Install pinned test dependencies
+        shell: bash
+        run: |
+          mkdir -p "$NEOTEST_ZIG_DEPS"
+          git clone --filter=blob:none https://github.com/nvim-lua/plenary.nvim.git "$NEOTEST_ZIG_DEPS/plenary.nvim"
+          git -C "$NEOTEST_ZIG_DEPS/plenary.nvim" checkout --detach 74b06c6c75e4eeb3108ec01852001636d85a932b
+          git clone --filter=blob:none https://github.com/nvim-neotest/nvim-nio.git "$NEOTEST_ZIG_DEPS/nvim-nio"
+          git -C "$NEOTEST_ZIG_DEPS/nvim-nio" checkout --detach 21f5324bfac14e22ba26553caf69ec76ae8a7662
+          git clone --filter=blob:none https://github.com/nvim-neotest/neotest.git "$NEOTEST_ZIG_DEPS/neotest"
+          git -C "$NEOTEST_ZIG_DEPS/neotest" checkout --detach ad991822b7076b1d940b33a9d6d0d30416d5df81
+
+      - name: Install pinned Zig parser
+        if: matrix.neovim == 'v0.12.2'
+        shell: bash
+        run: |
+          git clone --filter=blob:none https://github.com/tree-sitter-grammars/tree-sitter-zig.git "$NEOTEST_ZIG_DEPS/tree-sitter-zig"
+          git -C "$NEOTEST_ZIG_DEPS/tree-sitter-zig" checkout --detach 6479aa13f32f701c383083d8b28360ebd682fb7d
+          mkdir -p "$NEOTEST_ZIG_DEPS/treesitter-runtime/parser"
+          sources=("$NEOTEST_ZIG_DEPS/tree-sitter-zig/src/parser.c")
+          if [[ -f "$NEOTEST_ZIG_DEPS/tree-sitter-zig/src/scanner.c" ]]; then
+            sources+=("$NEOTEST_ZIG_DEPS/tree-sitter-zig/src/scanner.c")
+          fi
+          cc -O2 -fPIC -shared -I "$NEOTEST_ZIG_DEPS/tree-sitter-zig/src" \
+            "${sources[@]}" \
+            -o "$NEOTEST_ZIG_DEPS/treesitter-runtime/parser/zig.so"
+
+      - name: Run adapter tests
+        run: >-
+          nvim --headless
+          -u tests/minimal_init.lua
+          -c "PlenaryBustedDirectory tests/lua { minimal_init = 'tests/minimal_init.lua' }"
+
+      - name: Run Neotest end-to-end smoke test
+        if: matrix.neovim == 'v0.12.2'
+        run: >-
+          nvim --headless
+          -u tests/minimal_init.lua
+          -l tests/integration/neotest_smoke.lua

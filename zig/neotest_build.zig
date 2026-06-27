@@ -22,7 +22,7 @@ fn buildOriginalBuildGraph(b: *std.Build) void {
 }
 
 /// Adds a step to build test binaries without running them.
-/// Used for launching a debuger.https://codeberg.org/ziglings/exercises.git
+/// Used for launching a debugger.
 fn addNeotestBuildStep(b: *std.Build) void {
     const neotest_build_step = b.step("neotest-build", "Build tests without running");
     const test_step = getTestStep(b);
@@ -61,11 +61,14 @@ fn replaceTestRunner(b: *std.Build) void {
     const test_step = getTestStep(b);
     const test_runner = b.option([]const u8, "neotest-runner", "Use a custom test runner");
     for (test_step.dependencies.items) |maybe_test_step_run| {
-        if (maybe_test_step_run.cast(std.Build.Step.Run) == null) {
-            // Not interested in non-run steps here.
-            continue;
+        const test_step_run = maybe_test_step_run.cast(std.Build.Step.Run) orelse continue;
+        if (test_runner != null) {
+            // addRunArtifact enables Zig's test IPC protocol by default. The
+            // Neotest runner uses its own JSON protocol and must run as a
+            // normal child process.
+            test_step_run.stdio = .inherit;
         }
-        for (maybe_test_step_run.dependencies.items) |maybe_test_step_compile| {
+        for (test_step_run.step.dependencies.items) |maybe_test_step_compile| {
             const test_step_compile = maybe_test_step_compile.cast(std.Build.Step.Compile) orelse continue;
             test_step_compile.test_runner = if (test_runner) |x| .{
                 .path = .{ .cwd_relative = x },

@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const core = @import("runner_core.zig");
 
 const platform = if (builtin.os.tag == .windows)
     @import("platform/windows/platform.zig")
@@ -11,75 +12,14 @@ pub const std_options: std.Options = .{
     .logFn = runnerLogFn,
 };
 
-var log_level: std.log.Level = std.log.Level.err;
+var log_level: std.log.Level = .err;
 const log = std.log.scoped(.test_runner);
 
-pub fn runnerLogFn(
-    comptime level: std.log.Level,
-    comptime scope: @TypeOf(.EnumLiteral),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    if (scope == .test_runner and @intFromEnum(level) > @intFromEnum(log_level)) {
-        return;
-    }
-
-    const prefix = "[" ++ comptime level.asText() ++ "] ";
-
-    if (@hasDecl(std.debug, "lockStderr")) {
-        // zig >= 0.16: lockStderr returns a LockedStderr value.
-        var buf: [4096]u8 = undefined;
-        const stderr = std.debug.lockStderr(&buf);
-        defer std.debug.unlockStderr();
-        nosuspend stderr.file_writer.interface.print(prefix ++ format ++ "\n", args) catch return;
-    } else if (@hasDecl(std.debug, "lockStderrWriter")) {
-        // zig >= 0.15: lockStderrWriter locks + returns *Writer in one call
-        var buf: [4096]u8 = undefined;
-        const stderr = std.debug.lockStderrWriter(&buf);
-        defer std.debug.unlockStderrWriter();
-        nosuspend stderr.print(prefix ++ format ++ "\n", args) catch return;
-    } else {
-        // zig <= 0.14
-        lockStderr();
-        defer unlockStdErr();
-        const stderr = std.io.getStdErr().writer();
-        nosuspend stderr.print(prefix ++ format ++ "\n", args) catch return;
-    }
-}
-
-fn lockStderr() void {
-    if (@hasDecl(std.debug, "lockStdErr")) {
-        std.debug.lockStdErr();
-    } else {
-        // v0.12.0 compatability
-        std.debug.getStderrMutex().lock();
-    }
-}
-
-fn unlockStdErr() void {
-    if (@hasDecl(std.debug, "unlockStdErr")) {
-        std.debug.unlockStdErr();
-    } else {
-        // v0.12.0 compatability
-        std.debug.getStderrMutex().unlock();
-    }
-}
-
-const STATUS_FAILED = "failed";
-const STATUS_PASSED = "passed";
-const STATUS_SKIPPED = "skipped";
-
-const NEOTEST_INPUT_PATH = "--neotest-input-path";
-const NEOTEST_RESULTS_PATH = "--neotest-results-path";
-const NEOTEST_SOURCE_PATH = "--neotest-source-path";
-const TEST_RUNNER_LOGS_PATH = "--test-runner-logs-path";
-const TEST_RUNNER_LOG_LEVEL = "--test-runner-log-level";
-
-const TestInput = struct {
-    test_name: []const u8,
-    source_path: []const u8,
-    output_path: []const u8,
-};
+const neotest_input_path = "--neotest-input-path";
+const neotest_results_path = "--neotest-results-path";
+const neotest_source_path = "--neotest-source-path";
+const test_runner_logs_path = "--test-runner-logs-path";
+const test_runner_log_level = "--test-runner-log-level";
 
 const Error = struct {
     message: []const u8,
@@ -89,376 +29,269 @@ const Error = struct {
 const TestResult = struct {
     test_name: []const u8,
     source_path: []const u8,
-    output: ?[]const u8, // A path to a file containing full output for this test.
+    output: ?[]const u8,
     status: []const u8,
-    short: ?[]const u8, // A shortened version of the output.
+    short: ?[]const u8,
     errors: ?[]Error,
 };
 
-const Symbol = if (builtin.zig_version.minor == 13)
-    std.debug.SymbolInfo
-else
-    std.debug.Symbol;
+pub fn runnerLogFn(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    if (scope == .test_runner and @intFromEnum(level) > @intFromEnum(log_level)) return;
 
-fn getSymbolName(symbol: Symbol) []const u8 {
-    return if (builtin.zig_version.minor == 13)
-        symbol.symbol_name
-    else if (builtin.zig_version.minor >= 16)
-        symbol.name orelse ""
-    else
-        symbol.name;
+    var buffer: [4096]u8 = undefined;
+    const stderr = std.debug.lockStderr(&buffer);
+    defer std.debug.unlockStderr();
+    nosuspend stderr.file_writer.interface.print(
+        "[" ++ comptime level.asText() ++ "] " ++ format ++ "\n",
+        args,
+    ) catch {};
 }
 
-fn getSymbolFilename(symbol: Symbol) ?[]const u8 {
-    return if (builtin.zig_version.minor == 13)
-        if (symbol.line_info) |line_info| line_info.file_name else null
-    else if (symbol.source_location) |source_location| source_location.file_name else null;
-}
-
-fn getSymbolLine(symbol: Symbol) ?u64 {
-    return if (builtin.zig_version.minor == 13)
-        if (symbol.line_info) |line_info| line_info.line else null
-    else if (symbol.source_location) |source_location| source_location.line else null;
-}
-
-fn getTestInput(
-    test_name: []const u8,
-    source_path: []const u8,
-    test_inputs: []TestInput,
-) ?TestInput {
-    log.debug("Got needle {s} -> {s}", .{ source_path, test_name });
-    for (test_inputs) |test_input| {
-        log.debug("Comparing to {s} -> {s} ", .{ test_input.source_path, test_input.test_name });
-        if (std.mem.eql(u8, test_input.test_name, test_name) and std.mem.eql(u8, test_input.source_path, source_path)) {
-            return test_input;
-        }
-    }
-    return null;
-}
-
-fn getTestFunctionName(test_function_name: []const u8) []const u8 {
-    if (std.mem.indexOf(u8, test_function_name, ".test.")) |index| {
-        return test_function_name[index + 1 ..];
-    }
-    if (std.mem.indexOf(u8, test_function_name, ".decltest.")) |index| {
-        return test_function_name[index + 1 ..];
-    }
-    return test_function_name;
-}
-
-fn getSymbolAtAddress(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    debug_info: *std.debug.SelfInfo,
-    address: usize,
-) !Symbol {
-    if (builtin.zig_version.minor >= 16) {
-        var text_arena = std.heap.ArenaAllocator.init(allocator);
-        defer text_arena.deinit();
-
-        var symbols = try std.ArrayList(Symbol).initCapacity(allocator, 1);
-        defer symbols.deinit(allocator);
-
-        try debug_info.getSymbols(io, allocator, text_arena.allocator(), address, false, &symbols);
-        if (symbols.items.len == 0) {
-            return error.MissingDebugInfo;
-        }
-
-        const symbol = symbols.items[0];
-        return .{
-            .name = if (symbol.name) |name| try allocator.dupe(u8, name) else null,
-            .compile_unit_name = if (symbol.compile_unit_name) |name| try allocator.dupe(u8, name) else null,
-            .source_location = if (symbol.source_location) |source_location| .{
-                .line = source_location.line,
-                .column = source_location.column,
-                .file_name = try allocator.dupe(u8, source_location.file_name),
-            } else null,
-        };
-    } else {
-        const module = try debug_info.getModuleForAddress(address);
-        return try module.getSymbolAtAddress(allocator, address);
-    }
-}
-
-fn getFuncSymbolInfo(allocator: std.mem.Allocator, io: std.Io, func: *const fn () anyerror!void) !Symbol {
-    const debug_info = try std.debug.getSelfDebugInfo();
-    const func_address = @intFromPtr(func);
-    return getSymbolAtAddress(allocator, io, debug_info, func_address);
-}
-
-fn getZigLogLevelFromVimLogLevel(vim_log_level: u8) std.log.Level {
-    return switch (vim_log_level) {
-        0, 1 => std.log.Level.debug,
-        2 => std.log.Level.info,
-        3 => std.log.Level.warn,
-        4, 5 => std.log.Level.err,
-        else => std.log.Level.debug,
-    };
-}
-
+/// Zig calls this root declaration from `std.testing.fuzz`.
+///
+/// Interactive fuzz-server mode is handled by Zig's default runner and is not
+/// part of Neotest's selected-test protocol. Normal test runs execute the
+/// supplied corpus and the same empty-input smoke case as Zig's 0.16 runner.
 pub inline fn fuzz(
     context: anytype,
-    comptime testOne: fn (context: @TypeOf(context), input: []const u8) anyerror!void,
+    comptime testOne: fn (context: @TypeOf(context), *std.testing.Smith) anyerror!void,
     options: std.testing.FuzzInputOptions,
 ) anyerror!void {
-    _ = testOne;
-    _ = options;
-    return;
+    for (options.corpus) |input| {
+        var smith: std.testing.Smith = .{ .in = input };
+        try testOne(context, &smith);
+    }
+
+    var smith: std.testing.Smith = .{ .in = "" };
+    try testOne(context, &smith);
+}
+
+fn readFileAlloc(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    absolute_path: []const u8,
+) ![]u8 {
+    var file = try std.Io.Dir.openFileAbsolute(io, absolute_path, .{});
+    defer file.close(io);
+    var buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &buffer);
+    return reader.interface.allocRemaining(allocator, .unlimited);
+}
+
+fn firstLine(bytes: []const u8) []const u8 {
+    const end = std.mem.indexOfScalar(u8, bytes, '\n') orelse bytes.len;
+    return bytes[0..end];
+}
+
+fn writeResults(
+    io: std.Io,
+    absolute_path: []const u8,
+    results: []const TestResult,
+) !void {
+    var file = try std.Io.Dir.createFileAbsolute(io, absolute_path, .{});
+    defer file.close(io);
+
+    var buffer: [65536]u8 = undefined;
+    var writer = file.writer(io, &buffer);
+    var json: std.json.Stringify = .{ .writer = &writer.interface };
+    try json.write(results);
+    try writer.interface.flush();
 }
 
 pub fn main(init: std.process.Init) !void {
-    const DebugAllocator = if (@hasDecl(std.heap, "GeneralPurposeAllocator"))
-        std.heap.GeneralPurposeAllocator
-    else
-        std.heap.DebugAllocator;
-    var gpa = DebugAllocator(.{}){};
-    // zig >= 0.15: ArrayList = unmanaged; managed moved to array_list.Managed
-    // zig <= 0.14: ArrayList = managed (stores allocator)
-    const TestResultList = if (builtin.zig_version.minor >= 15)
-        std.array_list.Managed(TestResult)
-    else
-        std.ArrayList(TestResult);
-    var test_results = TestResultList.init(gpa.allocator());
-    const debug_info = try std.debug.getSelfDebugInfo();
-
+    const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    var input_path: []const u8 = undefined;
-    var results_dir_path: []const u8 = undefined;
+    var input_path: ?[]const u8 = null;
+    var results_dir_path: ?[]const u8 = null;
     var source_path: ?[]const u8 = null;
-    var logs_dir_path: []const u8 = undefined;
-    for (args, 0..) |arg, i| {
-        if (std.mem.eql(u8, NEOTEST_INPUT_PATH, arg) and args.len > i + 1) {
-            input_path = args[i + 1];
-        } else if (std.mem.eql(u8, NEOTEST_RESULTS_PATH, arg) and args.len > i + 1) {
-            results_dir_path = args[i + 1];
-        } else if (std.mem.eql(u8, NEOTEST_SOURCE_PATH, arg) and args.len > i + 1) {
-            source_path = args[i + 1];
-        } else if (std.mem.eql(u8, TEST_RUNNER_LOGS_PATH, arg) and args.len > i + 1) {
-            logs_dir_path = args[i + 1];
-        } else if (std.mem.eql(u8, TEST_RUNNER_LOG_LEVEL, arg) and args.len > i + 1) {
-            log_level = getZigLogLevelFromVimLogLevel(try std.fmt.parseInt(u8, args[i + 1], 0));
+    var logs_dir_path: ?[]const u8 = null;
+
+    for (args, 0..) |arg, index| {
+        if (std.mem.startsWith(u8, arg, "--seed=")) {
+            std.testing.random_seed = try std.fmt.parseUnsigned(u32, arg["--seed=".len..], 0);
+            continue;
+        }
+        const value = if (index + 1 < args.len) args[index + 1] else continue;
+        if (std.mem.eql(u8, neotest_input_path, arg)) {
+            input_path = value;
+        } else if (std.mem.eql(u8, neotest_results_path, arg)) {
+            results_dir_path = value;
+        } else if (std.mem.eql(u8, neotest_source_path, arg)) {
+            source_path = value;
+        } else if (std.mem.eql(u8, test_runner_logs_path, arg)) {
+            logs_dir_path = value;
+        } else if (std.mem.eql(u8, test_runner_log_level, arg)) {
+            log_level = core.zigLogLevel(try std.fmt.parseInt(u8, value, 0));
         }
     }
 
-    const logs_file_path = blk: {
-        const self_exe_path = try std.process.executablePathAlloc(init.io, gpa.allocator());
-        defer gpa.allocator().free(self_exe_path);
-        var hasher = std.hash.Wyhash.init(0);
-        std.hash.autoHashStrat(&hasher, self_exe_path, .Deep);
-        const hash_value = hasher.final();
-        var hash_buffer: [64]u8 = undefined;
-        const logs_file_name = try std.fmt.bufPrint(&hash_buffer, "{d}", .{hash_value});
-        break :blk try std.fs.path.join(gpa.allocator(), &.{ logs_dir_path, logs_file_name });
-    };
+    const input_file_path = input_path orelse return error.MissingNeotestInputPath;
+    const results_directory = results_dir_path orelse return error.MissingNeotestResultsPath;
+    const logs_directory = logs_dir_path orelse return error.MissingTestRunnerLogsPath;
+
+    const executable_path = try std.process.executablePathAlloc(init.io, allocator);
+    defer allocator.free(executable_path);
+    var logs_hasher = std.hash.Wyhash.init(0);
+    std.hash.autoHashStrat(&logs_hasher, executable_path, .Deep);
+    const logs_file_name = try std.fmt.allocPrint(allocator, "{d}", .{logs_hasher.final()});
+    defer allocator.free(logs_file_name);
+    const logs_file_path = try std.fs.path.join(
+        allocator,
+        &.{ logs_directory, logs_file_name },
+    );
+    defer allocator.free(logs_file_path);
+
     const logs_file = try platform.redirectStdErrToFile(init.io, logs_file_path);
     defer logs_file.close(init.io);
+    defer platform.restoreStdErr() catch {};
 
-    for (args, 0..) |arg, i| {
-        log.debug("arg[{d}] = {s}", .{ i, arg });
+    for (args, 0..) |arg, index| {
+        log.debug("arg[{d}] = {s}", .{ index, arg });
     }
 
-    const input = blk: {
-        var input_file = try std.Io.Dir.openFileAbsolute(init.io, input_path, .{});
-        defer input_file.close(init.io);
-        var read_buf: [4096]u8 = undefined;
-        var input_reader = input_file.reader(init.io, &read_buf);
-        const input_json = try input_reader.interface.allocRemaining(gpa.allocator(), .unlimited);
-        const input_parsed = try std.json.parseFromSlice([]TestInput, gpa.allocator(), input_json, .{});
-        break :blk input_parsed.value;
-    };
+    const input_json = try readFileAlloc(init.io, allocator, input_file_path);
+    defer allocator.free(input_json);
+    var parsed_input = try std.json.parseFromSlice([]core.TestInput, allocator, input_json, .{});
+    defer parsed_input.deinit();
+    const test_inputs = parsed_input.value;
 
-    // Get a hash value, which identifies this run step from others.
-    // The hash value will be used as a name for test results file.
-    var hasher = std.hash.Wyhash.init(0);
-    log.debug("\n--------------\nFOUND THESE TESTS:\n", .{});
+    var results_hasher = std.hash.Wyhash.init(0);
+    std.hash.autoHashStrat(&results_hasher, executable_path, .Deep);
     for (builtin.test_functions) |test_function| {
-        const test_func: *const fn () anyerror!void = test_function.func;
-        const test_symbol_name = getTestFunctionName(test_function.name);
-        log.debug(" > {s} \n", .{test_symbol_name});
-        if (source_path) |symbol_file_name| {
-            std.hash.autoHashStrat(&hasher, symbol_file_name, .Deep);
-        } else {
-            const test_symbol = getFuncSymbolInfo(gpa.allocator(), init.io, test_func) catch continue;
-            if (getSymbolFilename(test_symbol)) |symbol_file_name| {
-                std.hash.autoHashStrat(&hasher, symbol_file_name, .Deep);
-            }
-        }
-        std.hash.autoHashStrat(&hasher, test_symbol_name, .Deep);
+        std.hash.autoHashStrat(&results_hasher, test_function.name, .Deep);
     }
-    const hash_value = hasher.final();
-    var hash_buffer: [64]u8 = undefined;
-    const hash_string = try std.fmt.bufPrint(&hash_buffer, "{d}", .{hash_value});
-    const results_file_path = try std.fs.path.join(gpa.allocator(), &.{ results_dir_path, hash_string });
 
+    const results_file_name = try std.fmt.allocPrint(allocator, "{d}", .{results_hasher.final()});
+    defer allocator.free(results_file_name);
+    const results_file_path = try std.fs.path.join(
+        allocator,
+        &.{ results_directory, results_file_name },
+    );
+    defer allocator.free(results_file_path);
+
+    var results: std.ArrayList(TestResult) = .empty;
+    defer results.deinit(allocator);
+    var result_arena = std.heap.ArenaAllocator.init(allocator);
+    defer result_arena.deinit();
+    const result_allocator = result_arena.allocator();
+    const consumed_inputs = try allocator.alloc(bool, test_inputs.len);
+    defer allocator.free(consumed_inputs);
+    @memset(consumed_inputs, false);
     var processed_tests: usize = 0;
 
-    var test_started_at = std.Io.Clock.awake.now(init.io);
-
     for (builtin.test_functions) |test_function| {
-        const file = try platform.redirectStdErrToFile(init.io, logs_file_path);
-        defer file.close(init.io);
+        if (processed_tests == test_inputs.len) break;
 
-        if (processed_tests == input.len) {
-            // All requested tests have been processed.
-            break;
-        }
-
-        const test_func: *const fn () anyerror!void = test_function.func;
-        const test_symbol_name = getTestFunctionName(test_function.name);
-        const test_file_name = source_path orelse blk: {
-            const test_symbol = getFuncSymbolInfo(gpa.allocator(), init.io, test_func) catch {
-                log.debug("getFuncSymbolInfo got error", .{});
-                continue;
-            };
-            break :blk getSymbolFilename(test_symbol) orelse {
-                log.debug("test_file_name not found", .{});
-                continue;
-            };
-        };
-
-        // This is a work around for the issue where `LineInfo.file_name` returns
-        // incorrect path when invoked from `zig test` (`zig build test` works ok).
-        // When `zig test` is used, neotest adapter provides the `--neotest-source-path`
-        // argument, which provides the correct path.
-        // https://github.com/ziglang/zig/issues/19556
-        const test_source_path = test_file_name;
-
-        const test_input = getTestInput(test_symbol_name, test_source_path, input) orelse {
-            log.debug("getTestInput not found", .{});
-            continue;
-        };
+        const function: *const fn () anyerror!void = test_function.func;
+        const test_name = core.testFunctionName(test_function.name);
+        const input_index = (if (source_path) |standalone_source_path| index: {
+            for (test_inputs, consumed_inputs, 0..) |test_input, consumed, index| {
+                if (!consumed and
+                    std.mem.eql(u8, test_input.test_name, test_name) and
+                    std.mem.eql(u8, test_input.source_path, standalone_source_path))
+                {
+                    break :index index;
+                }
+            }
+            break :index null;
+        } else core.findBuildTestInput(
+            test_function.name,
+            test_name,
+            test_inputs,
+            consumed_inputs,
+        )) orelse continue;
+        const test_input = test_inputs[input_index];
+        consumed_inputs[input_index] = true;
+        processed_tests += 1;
 
         log.debug("Running test {s}::{s}", .{ test_input.source_path, test_input.test_name });
 
-        const test_input_file = try platform.redirectStdErrToFile(init.io, test_input.output_path);
-        defer test_input_file.close(init.io);
+        var output_file = try platform.redirectStdErrToFile(init.io, test_input.output_path);
 
-        processed_tests += 1;
+        std.testing.environ = init.minimal.environ;
+        std.testing.allocator_instance = .init;
+        std.testing.io_instance = .init(std.testing.allocator, .{
+            .argv0 = .init(init.minimal.args),
+            .environ = init.minimal.environ,
+        });
 
-        test_started_at = std.Io.Clock.awake.now(init.io);
-        test_func() catch |err| {
-            var errors = try gpa.allocator().alloc(Error, 1);
-            var error_line: ?usize = null;
-
-            if (@errorReturnTrace()) |trace| {
-                std.debug.dumpErrorReturnTrace(trace);
-                const last_frame_index = @min(trace.index, trace.instruction_addresses.len) - 1;
-                const return_address = trace.instruction_addresses[last_frame_index];
-                const address = return_address - 1;
-                const symbol_info = try getSymbolAtAddress(gpa.allocator(), init.io, debug_info, address);
-                const symbol_line = getSymbolLine(symbol_info) orelse {
-                    std.debug.print("Unable to retrieve line info\n", .{});
-                    return;
-                };
-                error_line = symbol_line - 1;
+        const started_at = std.Io.Clock.awake.now(init.io);
+        var test_error: ?anyerror = null;
+        function() catch |err| {
+            test_error = err;
+            if (err != error.SkipZigTest) {
+                if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
             }
-
-            if (err == error.SkipZigTest) {
-                errors[0] = .{ .message = "Skipped", .line = error_line };
-                try test_results.append(
-                    .{
-                        .source_path = test_input.source_path,
-                        .test_name = test_input.test_name,
-                        .output = test_input.output_path,
-                        .status = STATUS_SKIPPED,
-                        .short = "Skipped",
-                        .errors = errors,
-                    },
-                );
-            } else {
-                var first_output_line: []const u8 = undefined;
-                blk: {
-                    const output_file = std.Io.Dir.openFileAbsolute(init.io, test_input.output_path, .{}) catch {
-                        first_output_line = "Could not open output buffer.";
-                        break :blk;
-                    };
-                    defer output_file.close(init.io);
-                    if (builtin.zig_version.minor >= 15) {
-                        // zig >= 0.15: reader() takes explicit buf; use interface for generic methods
-                        var read_buf: [4096]u8 = undefined;
-                        var output_reader = output_file.reader(init.io, &read_buf);
-                        first_output_line = output_reader.interface.takeDelimiterExclusive('\n') catch
-                            "Could not read output file.";
-                    } else {
-                        // zig <= 0.14: bufferedReader wraps reader()
-                        var buffered_output_reader = std.io.bufferedReader(output_file.reader());
-                        const output_reader = buffered_output_reader.reader();
-                        first_output_line = output_reader.readUntilDelimiterAlloc(gpa.allocator(), '\n', 300) catch
-                            "Could not read output file.";
-                    }
-                }
-
-                const short = try std.mem.concat(gpa.allocator(), u8, &.{ @errorName(err), ": ", first_output_line });
-                const error_message = switch (err) {
-                    error.TestExpectedEqual => if (std.mem.startsWith(u8, first_output_line, "expected")) first_output_line else @errorName(err),
-                    else => @errorName(err),
-                };
-                errors[0] = .{ .message = error_message, .line = error_line };
-                try test_results.append(
-                    .{
-                        .source_path = test_input.source_path,
-                        .test_name = test_input.test_name,
-                        .output = test_input.output_path,
-                        .status = STATUS_FAILED,
-                        .short = short,
-                        .errors = errors,
-                    },
-                );
-            }
-
-            continue;
         };
+        std.testing.io_instance.deinit();
+        const leak_count = std.testing.allocator_instance.detectLeaks();
+        std.testing.allocator_instance.deinitWithoutLeakChecks();
+        const duration_ns = started_at.untilNow(init.io, .awake).nanoseconds;
 
-        const test_run_duration_in_ns = test_started_at.untilNow(init.io, .awake).nanoseconds;
+        try platform.redirectStdErr(logs_file);
+        output_file.close(init.io);
 
-        if (std.testing.allocator_instance.detectLeaks() != 0) {
-            try test_results.append(
-                .{
-                    .source_path = test_input.source_path,
-                    .test_name = test_input.test_name,
-                    .output = test_input.output_path,
-                    .status = STATUS_FAILED,
-                    .short = "Memory leaked (see full output for more details)",
-                    .errors = null,
-                },
-            );
+        const output = readFileAlloc(init.io, allocator, test_input.output_path) catch
+            try allocator.dupe(u8, "Could not read output file.");
+        defer allocator.free(output);
+        const output_first_line = firstLine(output);
+        const leaked = leak_count != 0;
+        const status = core.finalStatus(test_error, leaked);
+
+        var errors: ?[]Error = null;
+        var short: []const u8 = undefined;
+        switch (status) {
+            .passed => {
+                short = try std.fmt.allocPrint(
+                    result_allocator,
+                    "Test passed in {d}ms",
+                    .{@divTrunc(duration_ns, std.time.ns_per_ms)},
+                );
+            },
+            .skipped => {
+                short = "Skipped";
+                const error_list = try result_allocator.alloc(Error, 1);
+                error_list[0] = .{ .message = "Skipped", .line = null };
+                errors = error_list;
+            },
+            .failed => {
+                if (test_error) |err| {
+                    const error_line = core.traceSourceLine(output, test_input.source_path);
+                    short = try std.mem.concat(
+                        result_allocator,
+                        u8,
+                        &.{ @errorName(err), ": ", output_first_line },
+                    );
+                    const message = if (err == error.TestExpectedEqual and
+                        std.mem.startsWith(u8, output_first_line, "expected"))
+                        try result_allocator.dupe(u8, output_first_line)
+                    else
+                        @errorName(err);
+                    const error_list = try result_allocator.alloc(Error, 1);
+                    error_list[0] = .{ .message = message, .line = error_line };
+                    errors = error_list;
+                } else {
+                    short = "Memory leaked (see full output for more details)";
+                }
+            },
         }
 
-        // zig >= 0.15: fmtDuration removed; zig <= 0.14: fmtDuration exists
-        const short_output = if (builtin.zig_version.minor >= 15)
-            try std.fmt.allocPrint(gpa.allocator(), "Test passed in {d}ms", .{@divTrunc(test_run_duration_in_ns, std.time.ns_per_ms)})
-        else
-            try std.fmt.allocPrint(gpa.allocator(), "Test passed in {}", .{std.fmt.fmtDuration(test_run_duration_in_ns)});
-
-        std.log.info("{s}", .{short_output});
-
-        try test_results.append(
-            .{
-                .source_path = test_input.source_path,
-                .test_name = test_input.test_name,
-                .output = test_input.output_path,
-                .status = STATUS_PASSED,
-                .short = short_output,
-                .errors = null,
-            },
-        );
+        try results.append(allocator, .{
+            .source_path = test_input.source_path,
+            .test_name = test_input.test_name,
+            .output = test_input.output_path,
+            .status = status.text(),
+            .short = short,
+            .errors = errors,
+        });
     }
 
     try platform.restoreStdErr();
-
-    const results_file = try std.Io.Dir.createFileAbsolute(init.io, results_file_path, .{});
-    defer results_file.close(init.io);
-    if (builtin.zig_version.minor >= 15) {
-        // zig >= 0.15: stringifyAlloc gone; use Stringify writer directly
-        var write_buf: [65536]u8 = undefined;
-        var file_writer = results_file.writer(init.io, &write_buf);
-        var jw: std.json.Stringify = .{ .writer = &file_writer.interface };
-        try jw.write(test_results.items);
-        try file_writer.interface.flush();
-    } else {
-        // zig <= 0.14
-        const test_results_json = try std.json.stringifyAlloc(gpa.allocator(), test_results.items, .{});
-        try results_file.writeAll(test_results_json);
-    }
+    try writeResults(init.io, results_file_path, results.items);
 }

@@ -1,43 +1,56 @@
-1. Running tests when `build.zig` is present (`zig build test`)
-    1.1. Run individual test
-    1.2. Run individual file
-    1.3. Run directory
-    1.4. Run all directories
-    1.5. Run with multiple `build.zig` present
+# Test scenarios
 
-2. Running tests when `build.zig` is **NOT** present (`zig test`)
-    2.1. Run individual test
-    2.2. Run individual file
-    2.3. Run directory
-    2.4. Run all directories
+## Automated
 
-3. When tests fail to build, it should show up as error with output
-    3.1. For `zig build test`
-    3.2. For `zig test`
+The Zig unit suite covers:
 
-4. Logging
-    4.1. When disabled shouldn't write anything (lua and zig)
-    4.2. When enabled should write according to level (lua and zig)
+- Test and declaration symbol-name normalization
+- Exact input matching by symbol and source path
+- Neovim-to-Zig log-level mapping
+- POSIX and Windows failure-trace line parsing
+- Result precedence for failures, skips, leaks, and passes
 
-5. Detecting zig projects
-    5.1. When directory does not contain zig code, should not populate "Neotest Summary"
-    5.2. When directory contains zig code, should populate "Neotest Summary"
+The standalone runner integration covers:
 
-6. Handle statuses
-    6.1. Pass
-    6.2. Fail
-    6.3. Skip
+- Passing, failing, skipped, printing, testing-I/O, fuzz, and leaking tests
+- Failure source lines and exactly one result per selected test
+- Per-test allocator isolation after a leak
+- Captured `std.debug.print` and `std.log` output
 
-7. Provide error messages with line numbers
+The `zig build test` integration covers:
 
-8. Provide "short" text output version
+- Multiple test binaries
+- Passing, failing, and skipped results
+- Paths containing spaces
+- One result file per test binary without duplicate merged results
 
-9. Modifying tests
-    9.1. Add new file
-    9.2. Add new test
-    9.3. Remove test
-    9.4. Remove file
+The adapter specs cover:
 
-10. 🚧 Debug test
+- String and declaration symbol conversion
+- Argument-vector commands for standalone and build-project runs
+- Zig executable overrides and paths containing spaces
+- Result aggregation, missing-result skips, nonzero exits, and cleanup
 
-11. Writing to `std.debug.print` and `std.log.info` should appear in tests output
+The end-to-end Neotest smoke test covers real Zig Tree-sitter discovery,
+standalone command execution, and the final passing status reported by
+Neotest's state consumer.
+
+The Windows platform test compiles for Windows on every CI host and runs on
+Windows. It verifies that stderr redirection restores the original process
+handle.
+
+CI runs the runner integrations with Zig 0.16.0 and Neovim 0.12.2 on Linux,
+macOS, and Windows. Adapter specs run on Linux with Neovim 0.10.4, 0.11.5, and
+0.12.2.
+
+See the development section in `README.md` for local commands.
+
+## Manual
+
+These scenarios still require interactive Neovim validation:
+
+- Discovery updates after adding or removing Zig test files and declarations
+- Summary behavior for directories with and without Zig sources
+- DAP launch and debugging with the configured adapter
+- Short-output rendering in Neotest's UI
+- Build errors rendered for both standalone and `zig build test` runs

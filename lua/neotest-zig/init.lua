@@ -259,15 +259,23 @@ function M._build_spec_with_buildfile(args, build_file_path)
     local test_runner_logs_dir_path = M._get_temp_file_path()
     vim.loop.fs_mkdir(test_runner_logs_dir_path, 493)
 
-    local zig_test_command = M.path_to_zig ..
-        ' build test' ..
-        ' --build-file "' .. target_neotest_build_file_path .. '"' ..
-        ' -Dneotest-runner="' .. test_runner_path .. '"' ..
-        ' -- ' ..
-        ' --neotest-input-path "' .. neotest_input_path .. '"' ..
-        ' --neotest-results-path "' .. neotest_results_path .. '"' ..
-        ' --test-runner-logs-path "' .. test_runner_logs_dir_path .. '"' ..
-        ' --test-runner-log-level "' .. log.get_log_level() .. '"'
+    local zig_test_command = {
+        M.path_to_zig,
+        "build",
+        "test",
+        "--build-file",
+        target_neotest_build_file_path,
+        "-Dneotest-runner=" .. test_runner_path,
+        "--",
+        "--neotest-input-path",
+        neotest_input_path,
+        "--neotest-results-path",
+        neotest_results_path,
+        "--test-runner-logs-path",
+        test_runner_logs_dir_path,
+        "--test-runner-log-level",
+        tostring(log.get_log_level()),
+    }
 
     local run_spec = {
         command = zig_test_command,
@@ -365,21 +373,34 @@ function M._build_spec_without_buildfile(args)
     local test_runner_logs_dir_path = M._get_temp_file_path()
     vim.loop.fs_mkdir(test_runner_logs_dir_path, 493)
 
-    local zig_test_command = M.path_to_zig ..
-        ' test ' ..
-        source_path ..
-        ' --test-runner "' .. zig_test_runner_path .. '" ' ..
-        ' --test-cmd-bin' ..
-        ' --test-cmd "' .. '--neotest-input-path' .. '"' ..
-        ' --test-cmd "' .. neotest_input_path .. '"' ..
-        ' --test-cmd "' .. '--neotest-results-path' .. '"' ..
-        ' --test-cmd "' .. neotest_results_path .. '"' ..
-        ' --test-cmd "' .. '--neotest-source-path' .. '"' ..
-        ' --test-cmd "' .. source_path .. '"' ..
-        ' --test-cmd "' .. '--test-runner-logs-path' .. '"' ..
-        ' --test-cmd "' .. test_runner_logs_dir_path .. '"' ..
-        ' --test-cmd "' .. '--test-runner-log-level' .. '"' ..
-        ' --test-cmd "' .. log.get_log_level() .. '"'
+    local zig_test_command = {
+        M.path_to_zig,
+        "test",
+        source_path,
+        "--test-runner",
+        zig_test_runner_path,
+        "--test-cmd-bin",
+        "--test-cmd",
+        "--neotest-input-path",
+        "--test-cmd",
+        neotest_input_path,
+        "--test-cmd",
+        "--neotest-results-path",
+        "--test-cmd",
+        neotest_results_path,
+        "--test-cmd",
+        "--neotest-source-path",
+        "--test-cmd",
+        source_path,
+        "--test-cmd",
+        "--test-runner-logs-path",
+        "--test-cmd",
+        test_runner_logs_dir_path,
+        "--test-cmd",
+        "--test-runner-log-level",
+        "--test-cmd",
+        tostring(log.get_log_level()),
+    }
 
     local run_spec = {
         command = zig_test_command,
