@@ -141,3 +141,10 @@ jobs:
           nvim --headless
           -u tests/minimal_init.lua
           -l tests/integration/neotest_smoke.lua
+
+      - name: Run Neotest watch integration test
+        if: matrix.neovim == 'v0.12.2'
+        run: >-
+          nvim --headless
+          -u tests/minimal_init.lua
+          -l tests/integration/watch_spec.lua

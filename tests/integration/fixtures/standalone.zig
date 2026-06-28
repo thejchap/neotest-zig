@@ -17,6 +17,10 @@ test "fails" {
     try std.testing.expectEqual(@as(u8, 1), @as(u8, 2));
 }
 
+test "unexpected result" {
+    try std.testing.expect(false);
+}
+
 test "skips" {
     return error.SkipZigTest;
 }

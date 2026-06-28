@@ -137,6 +137,30 @@ M._test_treesitter_query = [[
     ) @test.definition
 ]]
 
+M._watch_treesitter_query = [[
+    ;; Imported module paths.
+    (builtin_function
+        (builtin_identifier) @_function
+        (arguments
+            (string
+                (string_content) @symbol
+            )
+        )
+        (#eq? @_function "@import")
+    )
+
+    ;; Imported aliases, referenced declarations, and function calls.
+    (field_expression
+        object: (identifier) @symbol
+    )
+    (field_expression
+        member: (identifier) @symbol
+    )
+    (call_expression
+        function: (identifier) @symbol
+    )
+]]
+
 function M._does_file_contain_tests(file_path)
     local content = lib.files.read(file_path)
     local tree = lib.treesitter.parse_positions_from_string(file_path, content, M._test_treesitter_query, {})
@@ -605,6 +629,11 @@ setmetatable(M, {
 
 M.setup = function(opts)
     opts = opts or {}
+
+    local neotest_config = require("neotest.config")
+    if not neotest_config.watch.symbol_queries.zig then
+        neotest_config.watch.symbol_queries.zig = M._watch_treesitter_query
+    end
 
     M.dap = vim.tbl_extend("force", {
         adapter = "lldb",

@@ -83,11 +83,6 @@ fn readFileAlloc(
     return reader.interface.allocRemaining(allocator, .unlimited);
 }
 
-fn firstLine(bytes: []const u8) []const u8 {
-    const end = std.mem.indexOfScalar(u8, bytes, '\n') orelse bytes.len;
-    return bytes[0..end];
-}
-
 fn writeResults(
     io: std.Io,
     absolute_path: []const u8,
@@ -240,7 +235,6 @@ pub fn main(init: std.process.Init) !void {
         const output = readFileAlloc(init.io, allocator, test_input.output_path) catch
             try allocator.dupe(u8, "Could not read output file.");
         defer allocator.free(output);
-        const output_first_line = firstLine(output);
         const leaked = leak_count != 0;
         const status = core.finalStatus(test_error, leaked);
 
@@ -263,16 +257,8 @@ pub fn main(init: std.process.Init) !void {
             .failed => {
                 if (test_error) |err| {
                     const error_line = core.traceSourceLine(output, test_input.source_path);
-                    short = try std.mem.concat(
-                        result_allocator,
-                        u8,
-                        &.{ @errorName(err), ": ", output_first_line },
-                    );
-                    const message = if (err == error.TestExpectedEqual and
-                        std.mem.startsWith(u8, output_first_line, "expected"))
-                        try result_allocator.dupe(u8, output_first_line)
-                    else
-                        @errorName(err);
+                    const message = try result_allocator.dupe(u8, core.failureMessage(err, output));
+                    short = message;
                     const error_list = try result_allocator.alloc(Error, 1);
                     error_list[0] = .{ .message = message, .line = error_line };
                     errors = error_list;

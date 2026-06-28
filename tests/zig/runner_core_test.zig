@@ -172,3 +172,18 @@ test "failure takes precedence over a leak and success is emitted once" {
         core.finalStatus(null, false),
     );
 }
+
+test "formats concise testing failure messages" {
+    try std.testing.expectEqualStrings(
+        "Expected condition to be true",
+        core.failureMessage(error.TestUnexpectedResult, "/opt/zig/std/testing.zig:1:1: frame"),
+    );
+    try std.testing.expectEqualStrings(
+        "expected 1, found 2",
+        core.failureMessage(error.TestExpectedEqual, "expected 1, found 2\n/opt/zig/std/testing.zig"),
+    );
+    try std.testing.expectEqualStrings(
+        "Values were not equal",
+        core.failureMessage(error.TestExpectedEqual, "/opt/zig/std/testing.zig:1:1: frame"),
+    );
+}

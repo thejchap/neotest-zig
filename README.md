@@ -53,6 +53,7 @@ return {
 - Exact test filtering
 - Per-test timing
 - Test output capture, including `std.debug.print` and `std.log`
+- Neotest watch reruns when a definition-capable Zig LSP client is attached
 
 ## 📄 Logs
 
@@ -102,9 +103,15 @@ NEOTEST_ZIG_DEPS=/path/to/dependencies \
   nvim --headless \
   -u tests/minimal_init.lua \
   -l tests/integration/neotest_smoke.lua
+
+NEOTEST_ZIG_DEPS=/path/to/dependencies \
+  nvim --headless \
+  -u tests/minimal_init.lua \
+  -l tests/integration/watch_spec.lua
 ```
 
 The adapter specs additionally require pinned checkouts of `plenary.nvim`,
 `nvim-nio`, and `neotest` beneath `NEOTEST_ZIG_DEPS`; the CI workflow records
-the exact revisions and command. The end-to-end smoke test also expects a Zig
-parser at `NEOTEST_ZIG_DEPS/treesitter-runtime/parser/zig.so`.
+the exact revisions and command. The end-to-end smoke and watch tests also
+expect a Zig parser at
+`NEOTEST_ZIG_DEPS/treesitter-runtime/parser/zig.so`.

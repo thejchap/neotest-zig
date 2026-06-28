@@ -66,6 +66,7 @@ vim.fn.mkdir(logs_dir, "p")
 local test_names = {
     "passes",
     "fails",
+    "unexpected result",
     "skips",
     "prints",
     "uses testing io",
@@ -141,6 +142,16 @@ end
 assert_equal(#test_names, vim.tbl_count(decoded_results), "unexpected result count")
 assert_equal("passed", decoded_results["test.passes"].status, "passing test status")
 assert_equal("failed", decoded_results["test.fails"].status, "failing test status")
+assert_equal(
+    "Expected condition to be true",
+    decoded_results["test.unexpected result"].short,
+    "unexpected-result summary"
+)
+assert_equal(
+    "Expected condition to be true",
+    decoded_results["test.unexpected result"].errors[1].message,
+    "unexpected-result diagnostic"
+)
 assert_equal("skipped", decoded_results["test.skips"].status, "skipped test status")
 assert_equal("passed", decoded_results["test.uses testing io"].status, "testing IO status")
 assert_equal("passed", decoded_results["test.fuzz smoke"].status, "fuzz smoke status")
@@ -149,16 +160,23 @@ assert_equal("passed", decoded_results["test.passes after leak"].status, "leak i
 
 local fixture_lines = vim.fn.readfile(source)
 local expected_failure_line
+local expected_unexpected_result_line
 for index, line in ipairs(fixture_lines) do
     if line:find("expectEqual", 1, true) then
         expected_failure_line = index - 1
-        break
+    elseif line:find("expect(false)", 1, true) then
+        expected_unexpected_result_line = index - 1
     end
 end
 assert_equal(
     expected_failure_line,
     decoded_results["test.fails"].errors[1].line,
     "failure line"
+)
+assert_equal(
+    expected_unexpected_result_line,
+    decoded_results["test.unexpected result"].errors[1].line,
+    "unexpected-result line"
 )
 
 local print_output = read_file(output_paths["test.prints"])

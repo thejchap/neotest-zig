@@ -35,6 +35,9 @@ The end-to-end Neotest smoke test covers real Zig Tree-sitter discovery,
 standalone command execution, and the final passing status reported by
 Neotest's state consumer.
 
+The watch integration test covers Zig symbol-query registration and a
+pass-to-fail rerun after `BufWritePost`.
+
 The Windows platform test compiles for Windows on every CI host and runs on
 Windows. It verifies that stderr redirection restores the original process
 handle.

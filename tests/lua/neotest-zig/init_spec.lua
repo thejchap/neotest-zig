@@ -112,6 +112,22 @@ describe("neotest-zig adapter", function()
         }, configured.dap)
     end)
 
+    it("registers a Zig symbol query for Neotest watch mode", function()
+        adapter.setup({})
+
+        local query = require("neotest.config").watch.symbol_queries.zig
+        assert.is_string(query)
+        assert.has_no.errors(function()
+            vim.treesitter.query.parse("zig", query)
+        end)
+
+        local custom_query = "(identifier) @symbol"
+        require("neotest.config").watch.symbol_queries.zig = custom_query
+        adapter.setup({})
+        assert.equals(custom_query, require("neotest.config").watch.symbol_queries.zig)
+        require("neotest.config").watch.symbol_queries.zig = query
+    end)
+
     a.it("constructs standalone commands as argv without quoting paths", function()
         local source_path = temp_path() .. " source with spaces.zig"
         table.insert(temp_paths, source_path)

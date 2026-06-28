@@ -151,3 +151,32 @@ pub fn finalStatus(test_error: ?anyerror, leaked: bool) Status {
     if (leaked) return .failed;
     return if (test_error != null) .skipped else .passed;
 }
+
+fn firstNonEmptyLine(output: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len != 0) return trimmed;
+    }
+    return null;
+}
+
+pub fn failureMessage(test_error: anyerror, output: []const u8) []const u8 {
+    const first_line = firstNonEmptyLine(output);
+    return switch (test_error) {
+        error.TestUnexpectedResult => "Expected condition to be true",
+        error.TestExpectedEqual => if (first_line) |line|
+            if (std.mem.startsWith(u8, line, "expected")) line else "Values were not equal"
+        else
+            "Values were not equal",
+        error.TestExpectedError => if (first_line) |line|
+            if (std.mem.startsWith(u8, line, "expected")) line else "Expected a different error"
+        else
+            "Expected a different error",
+        error.TestUnexpectedError => "Unexpected error",
+        error.TestExpectedApproxEqAbs, error.TestExpectedApproxEqRel => "Values were not approximately equal",
+        error.TestExpectedStartsWith => "String did not start with the expected value",
+        error.TestExpectedEndsWith => "String did not end with the expected value",
+        else => @errorName(test_error),
+    };
+}
